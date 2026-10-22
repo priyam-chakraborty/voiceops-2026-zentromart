@@ -4,8 +4,6 @@
 
 This repository contains a customer-support agent for the VoiceOps 2026 capstone. It supports prompt-only answers, document-grounded RAG, selected order-verification and escalation flows, and a Gnani.ai voice batch runner.
 
-> Before submission: replace this note with your actual team/participant details and public repository URL. Confirm every command below against the files you include.
-
 ## Requirements
 
 - Python 3.13 (the development machine used Python 3.13.6)
@@ -25,6 +23,11 @@ python -m pip install -r requirements.txt
 ```
 
 Create a local `.env` file by copying `.env.example`, then add your own keys:
+```bat
+copy .env.example .env
+notepad .env
+```
+
 
 ```text
 GEMINI_API_KEY=
@@ -89,7 +92,7 @@ The helper uses heuristic checks, not official course scoring. Review errors and
 
 ## Submission information
 
-- **Public repository URL:** [Add URL]
+- **Public repository URL:** https://github.com/priyam-chakraborty/voiceops-2026-zentromart
 - **Exact batch command:** `python voice_batch.py --input-dir input_audio --output-dir voice_outputs`
 - **Report:** `report.pdf` (maximum four pages)
 - **Demo:** `demo.mp4` (maximum two minutes)
