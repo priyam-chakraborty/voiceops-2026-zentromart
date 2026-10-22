@@ -1,0 +1,62 @@
+{
+  "input_audio": "grocery_return_question.wav",
+  "stt_language": "en-IN",
+  "tts_language": "en-IN",
+  "transcript": "how long do i have to return groceries",
+  "reply_text": "Hello! I am ZentroMart's AI customer support assistant. \n\nGrocery items cannot be returned for a change of mind [RET-2] [RET-5]. However, if your grocery item arrived damaged, expired, wrong, or missing, you can report it within 48 hours of delivery along with photos of the item and packaging [DWM-1].",
+  "reply_audio": "grocery_return_question.reply.wav",
+  "retrieved_evidence": [
+    {
+      "section_id": "RET-5",
+      "source": "pol_returns_v4.md",
+      "title": "Returns policy",
+      "doc_type": "policy",
+      "status": "current",
+      "effective_from": "2026-08-01",
+      "retrieval_score": 0.7361,
+      "text": "## [RET-5] Items that cannot be returned\nGrocery and fresh produce, innerwear, lingerie and swimwear, and gift cards or digital codes cannot be returned for change of mind. If such an item arrives damaged, expired, wrong or missing, follow the Damaged, wrong or missing items policy."
+    },
+    {
+      "section_id": "RET-2",
+      "source": "pol_returns_v4.md",
+      "title": "Returns policy",
+      "doc_type": "policy",
+      "status": "current",
+      "effective_from": "2026-08-01",
+      "retrieval_score": 0.7302,
+      "text": "## [RET-2] Return windows by category\nThe return window starts on the **delivery date** and is counted in calendar days. The category of every product is listed in the `return_category` column of the product catalog.\n\n| Category | Return window | Catalog code |\n| --- | --- | --- |\n| Electronics and accessories | 7 days | `electronics` |\n| Clothing, footwear and bags | 15 days | `fashion` |\n| Home, kitchen and furniture | 10 days | `home_kitchen` |\n| Beauty and personal care (unopened, seal intact) | 7 days | `beauty_sealed` |\n| Books and stationery | 10 days | `books_media` |\n| Grocery, fresh and perishables | Not returnable | `grocery` |\n| Innerwear, lingerie and swimwear | Not returnable | `innerwear` |\n| Gift cards and digital codes | Not returnable | `digital` |"
+    },
+    {
+      "section_id": "DWM-1",
+      "source": "pol_damaged_wrong_missing.md",
+      "title": "Damaged, wrong or missing items policy",
+      "doc_type": "policy",
+      "status": "current",
+      "effective_from": "2026-05-01",
+      "retrieval_score": 0.7231,
+      "text": "## [DWM-1] Reporting window\nReport a damaged, defective, expired, wrong or missing item within **48 hours of delivery**, with photos of the item and the packaging. This applies to every category, including grocery and other non-returnable items."
+    },
+    {
+      "section_id": "CAN-3",
+      "source": "pol_cancellations.md",
+      "title": "Cancellations policy",
+      "doc_type": "policy",
+      "status": "current",
+      "effective_from": "2026-05-01",
+      "retrieval_score": 0.7205,
+      "text": "## [CAN-3] Grocery delivery slots\nGrocery orders can be cancelled up to 2 hours before the start of the chosen delivery slot.\nIf the slot start time is not in the order record, ask the customer for the time shown in My Orders before confirming whether the cutoff has passed."
+    },
+    {
+      "section_id": "FAQ-2",
+      "source": "faq_general.md",
+      "title": "Frequently asked questions",
+      "doc_type": "faq",
+      "status": "current",
+      "effective_from": "2025-11-01",
+      "retrieval_score": 0.6954,
+      "text": "## [FAQ-2] Can I return something I bought?\nMost items can be returned within the return window. Some items, like grocery, cannot be returned."
+    }
+  ],
+  "ticket_id": null,
+  "status": "success"
+}

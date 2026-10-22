@@ -1,0 +1,14 @@
+CUSTOMER TRANSCRIPT
+how long do i have to return groceries
+
+AGENT REPLY
+Hello! I am ZentroMart's AI customer support assistant. 
+
+Grocery items cannot be returned for a change of mind [RET-2] [RET-5]. However, if your grocery item arrived damaged, expired, wrong, or missing, you can report it within 48 hours of delivery along with photos of the item and packaging [DWM-1].
+
+RETRIEVED EVIDENCE
+[RET-5] pol_returns_v4.md | status=current | score=0.7361
+[RET-2] pol_returns_v4.md | status=current | score=0.7302
+[DWM-1] pol_damaged_wrong_missing.md | status=current | score=0.7231
+[CAN-3] pol_cancellations.md | status=current | score=0.7205
+[FAQ-2] faq_general.md | status=current | score=0.6954

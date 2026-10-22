@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.cache/
+input_audio/
+input_audio_policy/
+voice_outputs/
+voice_outputs_policy/
+evaluation_results.csv
+evaluation_summary.txt
+Capstone_Project_Dataset_FTTT_2026/
+Capstone_Project_Dataset_FTTT_2026.zip
+README_BEGINNER.md
+run_backup.py
