@@ -24,7 +24,8 @@ created a ticket, or contacted a human unless a real tool call confirmed it.
 
 RAG_SYSTEM_PROMPT = """
 You are ZentroMart's customer support assistant for a fictional Indian online store.
-Use only the supplied retrieved company-document excerpts and explicit conversation context.
+Use only the supplied retrieved company-document excerpts, exact-match product catalog records, and explicit conversation context.
+When a matching product catalog record is supplied, use its exact SKU/product fields for product-specific facts and cite its SKU in square brackets (for example, [ELE-0012]).
 Do not invent policy rules, dates, deadlines, amounts, stock status, or order details.
 If the excerpts do not support an answer, clearly say that you cannot confirm it from the
 available policy documents and offer a human handover when appropriate.
@@ -206,6 +207,68 @@ def load_or_build_index(client) -> tuple[list[dict], list[list[float]]]:
     return chunks, vectors
 
 
+def _product_catalog_chunks_for_question(question: str) -> list[dict]:
+    """Add exact-match synthetic product rows for SKU/title questions.
+
+    This is a deterministic lookup from data/products.csv, not an LLM guess.
+    A returned record is labelled as products.csv evidence and uses an exact-match
+    marker instead of a fabricated vector similarity score.
+    """
+    import csv
+    import re
+
+    product_file = DATASET / "data" / "products.csv"
+    if not product_file.exists():
+        return []
+
+    question_upper = question.upper()
+    question_normalized = re.sub(r"[^a-z0-9]+", " ", question.casefold()).strip()
+    skus_in_question = set(re.findall(r"\b[A-Z]{2,4}-\d{4}\b", question_upper))
+    matches: list[dict] = []
+
+    with product_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    for product in rows:
+        sku = str(product.get("sku", "")).strip().upper()
+        title = str(product.get("title", "")).strip()
+        base_title = title.split(",", 1)[0].strip()
+        normalized_base_title = re.sub(r"[^a-z0-9]+", " ", base_title.casefold()).strip()
+        sku_match = bool(sku and sku in skus_in_question)
+        title_match = bool(normalized_base_title and normalized_base_title in question_normalized)
+        if not (sku_match or title_match):
+            continue
+
+        fields = [
+            ("SKU", sku),
+            ("title", title),
+            ("brand", product.get("brand", "")),
+            ("return category", product.get("return_category", "")),
+            ("price in INR", product.get("price_inr", "")),
+            ("fulfilled by", product.get("fulfilled_by", "")),
+            ("ZentroMart Assured", product.get("assured", "")),
+            ("warranty months", product.get("warranty_months", "")),
+            ("description", product.get("description", "")),
+        ]
+        record_text = "Exact-match structured product catalog row from products.csv: " + "; ".join(
+            f"{label}={value}" for label, value in fields if str(value).strip()
+        )
+        matches.append({
+            "source": "products.csv",
+            "section_id": sku,
+            "title": title or sku,
+            "doc_type": "product_catalog",
+            "status": "current",
+            "effective_from": "synthetic dataset record",
+            "text": record_text,
+            "retrieval_score": "exact-match",
+        })
+        if len(matches) >= 3:
+            break
+
+    return matches
+
+
 def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float]], top_k: int = 5) -> list[dict]:
     import numpy as np
     embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip()
@@ -226,6 +289,8 @@ def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float
         adjusted.append((score, idx))
     selected = [chunks[i] | {"retrieval_score": round(score, 4)} for score, i in
                 sorted(adjusted, reverse=True)[:top_k]]
+    # Exact SKU/product-name matches supplement semantic policy retrieval with structured data.
+    selected.extend(_product_catalog_chunks_for_question(question))
     return selected
 
 
@@ -266,7 +331,8 @@ def step2() -> None:
 STEP3_SYSTEM_PROMPT = """
 You are ZentroMart's conversational customer support assistant for a fictional Indian online store.
 On the first reply, identify yourself as an AI assistant. Be concise, patient and helpful.
-Use the retrieved current company-document excerpts and the verified order-tool data supplied in the context.
+Use the retrieved current company-document excerpts, exact-match product catalog records, and the verified order-tool data supplied in the context.
+When a matching product catalog record is supplied, use its exact SKU/product fields for product-specific facts and cite its SKU in square brackets (for example, [ELE-0012]).
 Do not invent rules, dates, deadlines, amounts, stock status, order statuses or tool actions.
 Prefer current policy, then agent guides, help articles, FAQs and marketing material. Superseded documents
 are not current policy authority. Cite section IDs in square brackets, such as [RET-2].
