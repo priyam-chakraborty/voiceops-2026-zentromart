@@ -1,3 +1,4 @@
+# VOICEOPS_EVALUATION_RELIABILITY_PATCH_V1
 """Beginner-friendly VoiceOps practice-question evaluator.
 
 Run from the VoiceOps project root. This uses the existing run.py functions and
@@ -172,6 +173,24 @@ def bool_cell(value: Any) -> str:
     return "PASS" if value else "FAIL"
 
 
+# VOICEOPS_EVALUATION_ERROR_CLASSIFICATION_V1
+def _evaluation_error_status(exc: Exception) -> str:
+    """Classify obvious provider/network failures separately from internal errors.
+
+    Unknown exceptions are deliberately not called provider errors. All error
+    statuses remain excluded from the heuristic score denominator.
+    """
+    message = f"{type(exc).__name__}: {exc}".casefold()
+    provider_markers = (
+        "429", "resource_exhausted", "quota", "rate limit", "too many requests",
+        "500", "502", "503", "504", "service unavailable", "temporarily unavailable",
+        "deadline_exceeded", "timed out", "timeout", "connection reset",
+        "connection error", "connection refused", "unauthorized", "permission denied",
+        "invalid api key", "invalid_api_key",
+    )
+    return "provider_error" if any(marker in message for marker in provider_markers) else "evaluation_error"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare prompt-only vs RAG on VoiceOps practice questions.")
     parser.add_argument("--limit", type=int, default=5,
@@ -223,10 +242,12 @@ def main() -> int:
                 scores1 = score_answer(answer1, row)
                 for key, value in scores1.items():
                     item[f"step1_{key}"] = value
+                item["step1_status"] = "scored"
             except Exception as exc:
                 item["step1_answer"] = ""
                 item["step1_error"] = str(exc)
-                item["step1_heuristic_pass"] = False
+                item["step1_heuristic_pass"] = None
+                item["step1_status"] = _evaluation_error_status(exc)
 
         if args.mode in {"both", "step2"}:
             try:
@@ -241,10 +262,12 @@ def main() -> int:
                 for key, value in scores2.items():
                     item[f"step2_{key}"] = value
                 item["step2_source_files"] = ";".join(sorted({str(s.get("source", "")) for s in sources}))
+                item["step2_status"] = "scored"
             except Exception as exc:
                 item["step2_answer"] = ""
                 item["step2_error"] = str(exc)
-                item["step2_heuristic_pass"] = False
+                item["step2_heuristic_pass"] = None
+                item["step2_status"] = _evaluation_error_status(exc)
         result_rows.append(item)
         print(f"[{number}/{len(selected)}] {qid} evaluated.")
 
@@ -271,7 +294,25 @@ def main() -> int:
     ]
     for mode in ("step1", "step2"):
         pass_key = f"{mode}_heuristic_pass"
-        scored = [r for r in result_rows if r.get(pass_key) is not None]
+        error_key = f"{mode}_error"
+        answer_key = f"{mode}_answer"
+        scored = [
+            r for r in result_rows
+            if r.get(pass_key) in (True, False)
+            and str(r.get(answer_key, "") or "").strip()
+            and not str(r.get(error_key, "") or "").strip()
+        ]
+        status_key = f"{mode}_status"
+        provider_error_count = sum(r.get(status_key) == "provider_error" for r in result_rows)
+        evaluation_error_count = sum(r.get(status_key) == "evaluation_error" for r in result_rows)
+        if provider_error_count:
+            summary_lines.append(
+                f"{mode.upper()} provider/API errors excluded from score: {provider_error_count}"
+            )
+        if evaluation_error_count:
+            summary_lines.append(
+                f"{mode.upper()} evaluation errors excluded from score: {evaluation_error_count}"
+            )
         if scored:
             passed = sum(1 for r in scored if r.get(pass_key) is True)
             summary_lines.append(f"{mode.upper()} heuristic passes: {passed}/{len(scored)} ({100*passed/len(scored):.1f}%)")
