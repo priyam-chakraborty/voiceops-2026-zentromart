@@ -89,9 +89,12 @@ class VoiceStep3Agent:
         self.history = self.history[-20:]
         return answer
 
+    # VOICEOPS_VOICE_BATCH_HANDOVER_FALLBACK_V1
     def respond(self, question: str) -> str:
         question = question.strip()
         self.last_evidence = []
+        # A batch result reports the ticket for this clip, never a previous clip.
+        self.last_ticket_id = None
         if not question:
             return self._finish(question, "Sorry, I didn't catch that. Could you say it again?")
 
@@ -113,16 +116,26 @@ class VoiceStep3Agent:
                 f"checks: reviewed customer message and applicable support workflow; "
                 f"escalation reason: {early_reason}"
             )
-            result = self.create_ticket(summary=summary, order_id=self.current_order_id, reason=early_reason,
-                                        intent=self.core._intent_for(question))
+            try:
+                result = self.create_ticket(summary=summary, order_id=self.current_order_id, reason=early_reason,
+                                            intent=self.core._intent_for(question))
+            except Exception as exc:
+                print(f"WARNING: Support-ticket creation failed ({type(exc).__name__}); no handover was confirmed.")
+                result = {"created": False}
             if result.get("created") is True:
-                self.last_ticket_id = result["ticket_id"]
-                answer = (f"I’m ZentroMart’s AI support assistant. I’ve created a support ticket for a human colleague. "
-                          f"Your ticket reference is {result['ticket_id']}. The team will review the issue; "
-                          "I can’t promise a particular outcome or timeline.")
+                self.last_ticket_id = str(result.get("ticket_id") or "").strip() or None
+                reference_text = (
+                    f"Your ticket reference is {self.last_ticket_id}. "
+                    if self.last_ticket_id else "A reference number is unavailable. "
+                )
+                answer = (
+                    "I’m ZentroMart’s AI support assistant. I’ve created a support ticket for a human colleague. "
+                    + reference_text
+                    + "The team will review the issue; I cannot promise a particular outcome or timeline."
+                )
             else:
                 answer = ("I’m ZentroMart’s AI support assistant. I couldn’t confirm that a support ticket was created, "
-                          "so I can’t claim a handover is complete. Please contact ZentroMart support directly.")
+                          "so I cannot claim a handover is complete. Please contact ZentroMart support directly.")
             return self._finish(question, answer)
 
         # Do not disclose order details until the dataset tool verifies the customer.
@@ -166,7 +179,16 @@ class VoiceStep3Agent:
         retrieval_query = question
         if prior_customer_turns:
             retrieval_query = "Recent customer context: " + " | ".join(prior_customer_turns) + "\nCurrent question: " + question
-        sources = self.core.retrieve(self.client, retrieval_query, self.chunks, self.vectors)
+        try:
+            sources = self.core.retrieve(self.client, retrieval_query, self.chunks, self.vectors)
+        except Exception as exc:
+            print(f"WARNING: Evidence retrieval failed ({type(exc).__name__}); returning a safe fallback.")
+            return self._finish(
+                question,
+                "I’m ZentroMart’s AI support assistant. The evidence-retrieval service is temporarily unavailable, "
+                "so I cannot confidently answer from current company policy right now. Please try again shortly "
+                "or contact ZentroMart support directly.",
+            )
         reason = self.core._escalation_reason(question, self.verified_order)
         required_sections: list[str] = []
         if reason:
@@ -204,22 +226,34 @@ class VoiceStep3Agent:
                 f"checks: retrieved current company-document sections" + (", verified order data" if self.verified_order else "; no order details disclosed") + "; "
                 f"escalation reason: {reason}"
             )
-            ticket = self.create_ticket(summary=summary, order_id=self.current_order_id, reason=reason,
-                                        intent=self.core._intent_for(question))
-            if ticket.get("created") is True:
-                self.last_ticket_id = ticket["ticket_id"]
-                extra = " TOOL RESULT: create_ticket returned created=True. Confirm the ticket honestly and do not promise an outcome or timeline."
-                if "more than ₹10,000" in reason:
-                    extra += (" This is a high-value damaged claim. Explicitly state that Priority Resolution handles claims "
-                              "above ₹10,000 and that the AI cannot approve it, citing [DWM-3] and [ESC-1].")
-                answer = self.core.generate_answer(self.client, question, self.core.STEP3_SYSTEM_PROMPT, context + "\n\n" + extra)
-                answer += f"\n\nA human-support ticket was created successfully. Reference: {self.last_ticket_id}."
-            else:
-                answer = self.core.generate_answer(self.client, question, self.core.STEP3_SYSTEM_PROMPT,
-                    context + "\n\nTOOL RESULT: create_ticket did not return created=True. Do not claim a ticket was created.")
-                answer += "\n\nI could not confirm ticket creation, so I cannot say the handover is complete."
+            try:
+                ticket = self.create_ticket(summary=summary, order_id=self.current_order_id, reason=reason,
+                                            intent=self.core._intent_for(question))
+            except Exception as exc:
+                print(f"WARNING: Support-ticket creation failed ({type(exc).__name__}); no handover was confirmed.")
+                ticket = {"created": False}
+            ticket_created = ticket.get("created") is True
+            self.last_ticket_id = str(ticket.get("ticket_id") or "").strip() or None if ticket_created else None
+            extra = "\n\nConfirm the ticket honestly and do not promise an outcome or timeline."
+            high_value_claim = "more than ₹10,000" in reason
+            if high_value_claim:
+                extra += (" This is a high-value damaged claim. Explicitly state that Priority Resolution handles claims "
+                          "above ₹10,000 and that the AI cannot approve it, citing [DWM-3] and [ESC-1].")
+            answer = self.core._generate_handover_answer(
+                self.client, question, context, ticket,
+                extra_handover_instruction=extra,
+                high_value_claim=high_value_claim,
+            )
         else:
-            answer = self.core.generate_answer(self.client, question, self.core.STEP3_SYSTEM_PROMPT, context)
+            try:
+                answer = self.core.generate_answer(self.client, question, self.core.STEP3_SYSTEM_PROMPT, context)
+            except Exception as exc:
+                print(f"WARNING: Detailed voice response generation failed ({type(exc).__name__}); using a safe fallback.")
+                answer = (
+                    "I’m ZentroMart’s AI support assistant. The detailed-response service is temporarily unavailable, "
+                    "so I could not complete a grounded answer just now. Please try again shortly or contact "
+                    "ZentroMart support directly."
+                )
 
         return self._finish(question, answer, sources)
 
@@ -245,15 +279,78 @@ def _build_sessions(input_dir: Path) -> tuple[list[Path], dict[str, list[Path]]]
     return files, sessions
 
 
+# VOICEOPS_BATCH_OUTPUT_COLLISION_HARDENING_V1
+def _build_output_bases(input_dir: Path, output_dir: Path, files: list[Path]) -> dict[Path, Path]:
+    """Map each input audio file to a unique output base path.
+
+    Audio files such as ``call.wav`` and ``call.mp3`` would otherwise both
+    produce ``call.transcript.txt`` and overwrite each other's results. The
+    mapping preserves legacy names for non-colliding files, disambiguates only
+    collisions, and checks collisions case-insensitively for Windows portability.
+    """
+    import hashlib
+
+    relative_bases = {path: path.relative_to(input_dir).with_suffix("") for path in files}
+
+    def key(relative_path: Path) -> str:
+        return relative_path.as_posix().casefold()
+
+    counts: dict[str, int] = {}
+    for relative_base in relative_bases.values():
+        base_key = key(relative_base)
+        counts[base_key] = counts.get(base_key, 0) + 1
+    colliding = {path for path, relative_base in relative_bases.items() if counts[key(relative_base)] > 1}
+
+    # Reserve every name that will keep its legacy path before assigning renamed paths.
+    assigned_keys = {
+        key(relative_base)
+        for path, relative_base in relative_bases.items()
+        if path not in colliding
+    }
+    resolved: dict[Path, Path] = {}
+    ordered_files = sorted(
+        files,
+        key=lambda path: (
+            path.relative_to(input_dir).as_posix().casefold(),
+            path.relative_to(input_dir).as_posix(),
+        ),
+    )
+    for path in ordered_files:
+        relative_base = relative_bases[path]
+        if path not in colliding:
+            resolved[path] = output_dir / relative_base
+            continue
+
+        extension = path.suffix.lower().lstrip(".") or "audio"
+        candidate = relative_base.with_name(f"{relative_base.name}.{extension}")
+        candidate_key = key(candidate)
+        if candidate_key in assigned_keys:
+            digest = hashlib.sha256(path.relative_to(input_dir).as_posix().encode("utf-8")).hexdigest()[:10]
+            candidate = relative_base.with_name(f"{relative_base.name}.{extension}.{digest}")
+            candidate_key = key(candidate)
+            counter = 1
+            while candidate_key in assigned_keys:
+                candidate = relative_base.with_name(f"{relative_base.name}.{extension}.{digest}.{counter}")
+                candidate_key = key(candidate)
+                counter += 1
+        assigned_keys.add(candidate_key)
+        resolved[path] = output_dir / candidate
+
+    return resolved
+
+
 def run_batch(args: argparse.Namespace) -> int:
     input_dir = Path(args.input_dir).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     if not input_dir.exists() or not input_dir.is_dir():
         print(f"ERROR: input folder does not exist: {input_dir}")
         return 2
-    if input_dir == output_dir or input_dir in output_dir.parents:
-        # Allow output under the working folder but avoid accidentally processing past output on reruns.
-        pass
+    # An output directory nested under the input directory is allowed and excluded
+    # from discovery below. Reject equal paths and output directories that contain
+    # the input tree, which would cause discovery to filter out every input file.
+    if input_dir == output_dir or output_dir in input_dir.parents:
+        print("ERROR: input and output folders must differ; output cannot contain the input folder.")
+        return 2
 
     if not os.getenv("GNANI_API_KEY", "").strip():
         print("ERROR: GNANI_API_KEY is missing from this project's .env file.")
@@ -273,6 +370,7 @@ def run_batch(args: argparse.Namespace) -> int:
     allowed = set(files)
     sessions = {key: [p for p in group if p in allowed] for key, group in sessions.items()}
     sessions = {key: group for key, group in sessions.items() if group}
+    output_bases = _build_output_bases(input_dir, output_dir, files)
 
     import run as core
     try:
@@ -308,7 +406,7 @@ def run_batch(args: argparse.Namespace) -> int:
 
     for index, audio_path in enumerate(files, start=1):
         relative = audio_path.relative_to(input_dir)
-        out_base = output_dir / relative.with_suffix("")
+        out_base = output_bases[audio_path]
         out_base.parent.mkdir(parents=True, exist_ok=True)
         result: dict[str, Any] = {
             "input_audio": str(relative),
@@ -377,7 +475,7 @@ def run_batch(args: argparse.Namespace) -> int:
         "voice": args.voice,
         "tts_model": args.tts_model,
         "results": [
-            str((output_dir / p.relative_to(input_dir).with_suffix("")).with_name(p.relative_to(input_dir).stem + ".result.json").relative_to(output_dir))
+            str(output_bases[p].with_name(output_bases[p].name + ".result.json").relative_to(output_dir))
             for p in files
         ],
     }

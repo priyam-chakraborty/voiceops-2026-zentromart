@@ -170,6 +170,51 @@ def _embed_texts(client, texts: list[str], model: str, task_type: str) -> list[l
     return vectors
 
 
+# VOICEOPS_OFFLINE_FOLLOWUP_HARDENING_V1
+# VOICEOPS_INDEX_CACHE_HARDENING_V1
+def _index_cache_fingerprint(chunks: list[dict], embedding_model: str, output_dimensionality: int = 768) -> str:
+    """Fingerprint every field used to construct embedded text and the embedding config."""
+    import hashlib
+    import json
+
+    embedded_fields = ("source", "section_id", "title", "doc_type", "status", "effective_from", "text")
+    payload = {
+        "cache_schema_version": 2,
+        "embedding_model": str(embedding_model).strip(),
+        "output_dimensionality": int(output_dimensionality),
+        "chunks": [{key: chunk.get(key, "") for key in embedded_fields} for chunk in chunks],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _valid_cached_vectors(vectors: object, expected_count: int, expected_dimensions: int = 768) -> bool:
+    """Reject malformed, non-finite, wrong-shaped, or zero-filled cache vectors."""
+    import math
+
+    if not isinstance(vectors, list) or len(vectors) != expected_count:
+        return False
+    for vector in vectors:
+        if not isinstance(vector, list) or len(vector) != expected_dimensions:
+            return False
+        has_nonzero = False
+        for value in vector:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            try:
+                number = float(value)
+            except (OverflowError, ValueError):
+                return False
+            # Retrieval casts vectors to NumPy float32; reject values that would
+            # overflow during that cast even though Python float considers them finite.
+            if not math.isfinite(number) or abs(number) > 3.4028234663852886e38:
+                return False
+            has_nonzero = has_nonzero or number != 0.0
+        if not has_nonzero:
+            return False
+    return True
+
+
 def load_or_build_index(client) -> tuple[list[dict], list[list[float]]]:
     import hashlib
     import json
@@ -177,33 +222,55 @@ def load_or_build_index(client) -> tuple[list[dict], list[list[float]]]:
     cache_dir.mkdir(exist_ok=True)
     cache_file = cache_dir / "rag_index.json"
     chunks = read_knowledge_chunks()
-    fingerprint_source = "\n".join(
+    embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip() or "gemini-embedding-001"
+    fingerprint = _index_cache_fingerprint(chunks, embedding_model, output_dimensionality=768)
+    # Read old caches only when their complete cached chunks still match current source.
+    legacy_fingerprint_source = "\n".join(
         c["source"] + "|" + c["section_id"] + "|" + c["text"] + "|" + c["status"]
         for c in chunks
     )
-    fingerprint_source += os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
-    fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+    legacy_fingerprint_source += os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+    legacy_fingerprint = hashlib.sha256(legacy_fingerprint_source.encode("utf-8")).hexdigest()
     if cache_file.exists():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            if cached.get("fingerprint") == fingerprint:
-                print(f"Loaded {len(cached['chunks'])} sections from local embedding cache.")
-                return cached["chunks"], cached["vectors"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(f"WARNING: Ignoring unreadable RAG index cache ({type(exc).__name__}); rebuilding embeddings.")
+        else:
+            if (
+                isinstance(cached, dict)
+                and cached.get("fingerprint") in {fingerprint, legacy_fingerprint}
+                and cached.get("chunks") == chunks
+                and _valid_cached_vectors(cached.get("vectors"), len(chunks), expected_dimensions=768)
+            ):
+                print(f"Loaded {len(chunks)} sections from local embedding cache.")
+                return chunks, cached["vectors"]
+            print("WARNING: RAG index cache is stale or malformed; rebuilding embeddings.")
     print(f"Building RAG index from {len(chunks)} company-document sections...")
-    embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip()
     texts = [
         f"Title: {c['title']}\nType: {c['doc_type']}\nStatus: {c['status']}\n"
         f"Effective from: {c['effective_from']}\nSection: [{c['section_id']}]\n{c['text']}"
         for c in chunks
     ]
     vectors = _embed_texts(client, texts, embedding_model, "RETRIEVAL_DOCUMENT")
-    cache_file.write_text(
-        json.dumps({"fingerprint": fingerprint, "chunks": chunks, "vectors": vectors}),
-        encoding="utf-8",
+    if not _valid_cached_vectors(vectors, len(chunks), expected_dimensions=768):
+        raise RuntimeError("Embedding API returned an invalid document vector count, dimension, or numeric value; the RAG index was not cached.")
+    cache_payload = json.dumps(
+        {"fingerprint": fingerprint, "chunks": chunks, "vectors": vectors},
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    print(f"Saved local index to {cache_file.relative_to(ROOT)}.")
+    temp_cache_file = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
+    try:
+        temp_cache_file.write_text(cache_payload, encoding="utf-8")
+        temp_cache_file.replace(cache_file)
+        print(f"Saved local index to {cache_file.relative_to(ROOT)}.")
+    except OSError as exc:
+        print(f"WARNING: Could not save the local RAG cache ({type(exc).__name__}); using the in-memory index.")
+        try:
+            temp_cache_file.unlink(missing_ok=True)
+        except OSError:
+            pass
     return chunks, vectors
 
 
@@ -440,16 +507,25 @@ def _retrieval_topic_bonus(question: str, chunk: dict) -> float:
     return bonus
 
 
-def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float]], top_k: int = 5) -> list[dict]:
+def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float]], top_k: int = 5, *, topic_question: str | None = None) -> list[dict]:
     import numpy as np
-    embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip()
+    embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip() or "gemini-embedding-001"
+    # Validate the existing index before spending quota on a query embedding.
+    if not isinstance(vectors, list) or not vectors or len(vectors) != len(chunks):
+        raise RuntimeError("RAG index has an invalid document vector count; retrieval was stopped before query embedding.")
+    expected_dimensions = len(vectors[0]) if isinstance(vectors[0], list) else 0
+    if not _valid_cached_vectors(vectors, len(chunks), expected_dimensions=expected_dimensions):
+        raise RuntimeError("RAG index has invalid document vector dimensions or numeric values.")
     q_vectors = _embed_texts(client, [question], embedding_model, "RETRIEVAL_QUERY")
+    if not _valid_cached_vectors(q_vectors, 1, expected_dimensions=expected_dimensions):
+        raise RuntimeError("Embedding API returned an invalid query vector count, dimension, or numeric value.")
     q = np.asarray(q_vectors[0], dtype=np.float32)
     matrix = np.asarray(vectors, dtype=np.float32)
     q_norm = np.linalg.norm(q) + 1e-12
     doc_norms = np.linalg.norm(matrix, axis=1) + 1e-12
     scores = (matrix @ q) / (doc_norms * q_norm)
-    historical_policy_query = _asks_for_historical_policy(question)
+    topic_query = topic_question if topic_question is not None else question
+    historical_policy_query = _asks_for_historical_policy(topic_query)
     adjusted = []
     for idx, score in enumerate(scores.tolist()):
         chunk = chunks[idx]
@@ -462,7 +538,7 @@ def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float
             score -= 0.18
         if chunk["doc_type"].lower() == "policy" and chunk["status"].lower() == "current":
             score += 0.025
-        score += _retrieval_topic_bonus(question, chunk)
+        score += _retrieval_topic_bonus(topic_query, chunk)
         adjusted.append((score, idx))
     selected = [chunks[i] | {"retrieval_score": round(score, 4)} for score, i in
                 sorted(adjusted, reverse=True)[:top_k]]
@@ -522,13 +598,47 @@ The dataset reference date is 20 October 2026. Be clear when a date or timeline 
 """.strip()
 
 
+# VOICEOPS_IDENTIFIER_PARSING_HARDENING_V1
 def _number_groups(text: str) -> list[str]:
+    """Return standalone numeric tokens, excluding dates and alphanumeric SKU suffixes.
+
+    Supports ordinary and grouped ASCII digits, while preventing strings such as
+    ``2026-10-12`` or ``ELE-0012`` from being treated as order IDs/verification codes.
+    """
     import re
-    groups = re.findall(r"(?<![A-Za-z0-9])(?:\d[\s-]*){4,12}(?!\d)", text)
-    result = []
-    for group in groups:
-        digits = "".join(ch for ch in group if ch.isdigit())
-        if len(digits) in {4, 6, 8} and digits not in result:
+
+    result: list[str] = []
+    pattern = re.compile(r"(?<![A-Za-z0-9])(?:[0-9][\s-]*){4,12}(?![0-9])")
+    # Keep the full span of common date spellings so the year cannot be misread
+    # as a four-digit verification code when separators are slash or dot.
+    date_pattern = re.compile(
+        r"(?<![0-9])(?:[0-9]{4}\s*[-/.]\s*[0-9]{1,2}\s*[-/.]\s*[0-9]{1,2}|"
+        r"[0-9]{1,2}\s*[-/.]\s*[0-9]{1,2}\s*[-/.]\s*[0-9]{4})(?![0-9])"
+    )
+    date_spans = [date_match.span() for date_match in date_pattern.finditer(text or "")]
+    for match in pattern.finditer(text or ""):
+        if any(match.start() < date_end and match.end() > date_start for date_start, date_end in date_spans):
+            continue
+        raw = match.group(0)
+        compact = re.sub(r"\s+", "", raw)
+        digits = "".join(ch for ch in raw if "0" <= ch <= "9")
+        if len(digits) not in {4, 6, 8}:
+            continue
+
+        # Codes at the end of SKUs (e.g. ELE-0012) are not customer proof values.
+        prefix = (text or "")[:match.start()]
+        if re.search(r"(?i)[A-Z]{2,5}-$", prefix[-8:]):
+            continue
+
+        # Dates are numbers, but they are not eight-digit order IDs. Ignore common
+        # YYYY-MM-DD and DD-MM-YYYY spellings, allowing whitespace around separators.
+        if len(digits) == 8 and "-" in compact and (
+            re.fullmatch(r"[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}", compact)
+            or re.fullmatch(r"[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}", compact)
+        ):
+            continue
+
+        if digits not in result:
             result.append(digits)
     return result
 
@@ -662,6 +772,49 @@ def _display_evidence(sources: list[dict]) -> None:
 
 
 # VOICEOPS_STEP3_HANDOVER_FALLBACK_V1
+def _safe_interactive_ticket_reference(value: object) -> str | None:
+    """Return a conservative ticket reference suitable for prompts and customer text."""
+    import unicodedata
+
+    if not isinstance(value, str):
+        return None
+    reference = value.strip()
+    if not reference or len(reference) > 120:
+        return None
+    # Reject control and formatting characters (including bidi overrides) to prevent
+    # multiline/log/visual spoofing in prompts and customer-visible confirmations.
+    if any(unicodedata.category(char) in {"Cc", "Cf"} for char in reference):
+        return None
+    return reference
+
+
+def _create_ticket_result_safely(ticket_creator, *, summary: str, order_id: str | None, reason: str, intent: str) -> dict:
+    """Call a ticket tool and normalize errors or malformed results without claiming success."""
+    try:
+        result = ticket_creator(summary=summary, order_id=order_id, reason=reason, intent=intent)
+    except Exception as exc:
+        print(
+            "WARNING: Policy-driven support-ticket creation failed "
+            f"({type(exc).__name__}); no handover was confirmed."
+        )
+        return {"created": False}
+
+    if not isinstance(result, dict) or type(result.get("created")) is not bool:
+        print(
+            "WARNING: Policy-driven support-ticket creation returned a malformed result; "
+            "no handover was confirmed."
+        )
+        return {"created": False}
+
+    if result.get("created") is not True:
+        return {"created": False}
+
+    ticket_id = _safe_interactive_ticket_reference(result.get("ticket_id"))
+    if ticket_id is None:
+        return {"created": True}
+    return {"created": True, "ticket_id": ticket_id}
+
+
 def _generate_handover_answer(
     client,
     question: str,
@@ -676,8 +829,8 @@ def _generate_handover_answer(
     never leave the caller without a truthful confirmation just because answer
     generation is unavailable.
     """
-    ticket_created = ticket.get("created") is True
-    ticket_id = str(ticket.get("ticket_id") or "").strip()
+    ticket_created = isinstance(ticket, dict) and ticket.get("created") is True
+    ticket_id = _safe_interactive_ticket_reference(ticket.get("ticket_id")) if ticket_created else None
 
     if ticket_created:
         if ticket_id:
@@ -722,7 +875,7 @@ def _generate_handover_answer(
                 "and I cannot approve the claim [DWM-3] [ESC-1]."
             )
         fallback_parts.append(
-            "A human colleague will review the issue; I can’t promise a particular outcome or timeline. "
+            "A human colleague will review the issue; I cannot promise a particular outcome or timeline. "
             "The detailed-response service is temporarily unavailable."
         )
         return " ".join(fallback_parts)
@@ -732,6 +885,94 @@ def _generate_handover_answer(
             return answer + f"\n\nA human-support ticket was created successfully. Reference: {ticket_id}."
         return answer + "\n\nA human-support ticket was created successfully, but a reference number is unavailable."
     return answer + "\n\nI could not confirm ticket creation, so I cannot say the handover is complete."
+
+
+# VOICEOPS_INTERACTIVE_HANDOVER_SAFETY_V1
+def _create_early_escalation_ticket_confirmation(
+    ticket_creator,
+    *,
+    summary: str,
+    order_id: str | None,
+    reason: str,
+    intent: str,
+) -> tuple[str, str | None]:
+    """Create an escalation ticket without trusting malformed tool results."""
+    unconfirmed = (
+        "I am ZentroMart's AI support assistant. I could not confirm that a support ticket was created, "
+        "so I cannot claim a handover is complete. Please contact ZentroMart support directly for human assistance."
+    )
+    try:
+        result = ticket_creator(summary=summary, order_id=order_id, reason=reason, intent=intent)
+    except Exception as exc:
+        # Keep provider/tool details out of the customer-facing message and logs.
+        print(
+            f"WARNING: Interactive support-ticket creation failed ({type(exc).__name__}); "
+            "no handover was confirmed."
+        )
+        return unconfirmed, None
+
+    if not isinstance(result, dict):
+        print("WARNING: Interactive support-ticket creation returned a malformed result; no handover was confirmed.")
+        return unconfirmed, None
+    if result.get("created") is not True:
+        return unconfirmed, None
+
+    raw_ticket_id = result.get("ticket_id")
+    ticket_id = raw_ticket_id.strip() if isinstance(raw_ticket_id, str) else ""
+    if (
+        not ticket_id
+        or len(ticket_id) > 120
+        or any(ord(character) < 32 or ord(character) == 127 for character in ticket_id)
+    ):
+        # Ticket creation is confirmed, but an absent/unsafe reference must not be invented or echoed.
+        answer = (
+            "I am ZentroMart's AI support assistant. The system confirmed that a support ticket was created, "
+            "but it did not return a usable reference number. A human colleague will review the issue; "
+            "I cannot promise a particular outcome or timeline."
+        )
+        return answer, None
+
+    answer = (
+        "I am ZentroMart's AI support assistant. The system confirmed that a support ticket was created. "
+        f"Your ticket reference is {ticket_id}. A human colleague will review the issue; "
+        "I cannot promise a particular outcome or timeline."
+    )
+    return answer, ticket_id
+
+
+# VOICEOPS_ORDER_LOOKUP_SAFETY_V1
+_ORDER_LOOKUP_NO_VERIFICATION = object()
+
+
+def _safe_order_lookup_result(lookup_tool, order_id: str, verification_value=_ORDER_LOOKUP_NO_VERIFICATION) -> dict:
+    """Call the local order tool without letting tool errors or malformed data bypass verification."""
+    try:
+        if verification_value is _ORDER_LOOKUP_NO_VERIFICATION:
+            # The result is intentionally discarded: unverified order data must never enter conversation state.
+            lookup_tool(order_id)
+            return {"_lookup_error": False}
+        result = lookup_tool(order_id, verification_value)
+    except Exception as exc:
+        print(f"WARNING: Order lookup failed ({type(exc).__name__}); no order details disclosed.")
+        return {"verified": False, "found": False, "_lookup_error": True}
+
+    if not isinstance(result, dict):
+        print("WARNING: Order lookup returned a malformed result; no order details disclosed.")
+        return {"verified": False, "found": False, "_lookup_error": True}
+
+    verified = result.get("verified")
+    found = result.get("found")
+    if type(verified) is not bool or type(found) is not bool or (verified is True and found is not True):
+        print("WARNING: Order lookup returned a malformed result; no order details disclosed.")
+        return {"verified": False, "found": False, "_lookup_error": True}
+
+    if verified is not True:
+        # Never pass order/status/customer fields from a failed verification result onward.
+        return {"verified": False, "found": found}
+
+    safe_result = dict(result)
+    safe_result.pop("_lookup_error", None)
+    return safe_result
 
 
 def step3() -> None:
@@ -785,12 +1026,13 @@ def step3() -> None:
                 f"checks: reviewed customer message and applicable support workflow; "
                 f"escalation reason: {early_reason}"
             )
-            result = create_ticket(summary=summary, order_id=current_order_id, reason=early_reason, intent=_intent_for(question))
-            if result.get("created") is True:
-                answer = f"I’m ZentroMart’s AI support assistant. I’ve created a support ticket for a human colleague. Your ticket reference is {result['ticket_id']}. The team will review the issue; I can’t promise a particular outcome or timeline."
-                last_ticket_id = result["ticket_id"]
-            else:
-                answer = "I’m ZentroMart’s AI support assistant. I couldn’t confirm that a support ticket was created, so I can’t claim a handover is complete. Please contact ZentroMart support directly for human assistance."
+            answer, last_ticket_id = _create_early_escalation_ticket_confirmation(
+                ticket_creator=create_ticket,
+                summary=summary,
+                order_id=current_order_id,
+                reason=early_reason,
+                intent=_intent_for(question),
+            )
             first_reply = False
             print("Agent:", answer, "\n")
             history.extend([("Customer", question), ("Agent", answer)])
@@ -799,7 +1041,17 @@ def step3() -> None:
         # Do not disclose order-specific information until lookup_order verifies the caller.
         if current_order_id and verified_order is None and not verification_locked:
             if verification_value:
-                result = lookup_order(current_order_id, verification_value)
+                result = _safe_order_lookup_result(lookup_order, current_order_id, verification_value)
+                if result.get("_lookup_error") is True:
+                    answer = (
+                        "I am ZentroMart's AI support assistant. I could not complete order verification "
+                        "because the lookup service is temporarily unavailable. I will not share order "
+                        "details until verification succeeds. Please try again later or contact support."
+                    )
+                    first_reply = False
+                    print("Agent:", answer, "\n")
+                    history.extend([("Customer", question), ("Agent", answer)])
+                    continue
                 if result.get("verified") is True and result.get("found") is True:
                     verified_order = result
                     verification_attempts = 0
@@ -816,9 +1068,15 @@ def step3() -> None:
                     history.extend([("Customer", question), ("Agent", answer)])
                     continue
             elif candidate_order_id or _needs_specific_order_lookup(question):
-                result = lookup_order(current_order_id)
-                # The no-verification tool call is designed to return no sensitive order data.
-                answer = "I’m ZentroMart’s AI support assistant. I can help with that order. Before sharing order-specific information, please provide either the last four digits of the registered phone number or the six-digit delivery pincode."
+                lookup_probe = _safe_order_lookup_result(lookup_order, current_order_id)
+                if lookup_probe.get("_lookup_error") is True:
+                    answer = (
+                        "I am ZentroMart's AI support assistant. The order lookup service is temporarily "
+                        "unavailable. I will not share order details without verification. Please try again "
+                        "later or contact support."
+                    )
+                else:
+                    answer = "I’m ZentroMart’s AI support assistant. I can help with that order. Before sharing order-specific information, please provide either the last four digits of the registered phone number or the six-digit delivery pincode."
                 first_reply = False
                 print("Agent:", answer, "\n")
                 history.extend([("Customer", question), ("Agent", answer)])
@@ -843,7 +1101,7 @@ def step3() -> None:
             retrieval_query = question
             if prior_customer_turns:
                 retrieval_query = "Recent customer context: " + " | ".join(prior_customer_turns) + "\nCurrent question: " + question
-            sources = retrieve(client, retrieval_query, chunks, vectors)
+            sources = retrieve(client, retrieval_query, chunks, vectors, topic_question=question)
             reason = _escalation_reason(question, verified_order)
             required_sections = []
             if reason:
@@ -875,7 +1133,15 @@ def step3() -> None:
                     f"checks: retrieved current company-document sections" + (", verified order data" if verified_order else "; no order details disclosed") + "; "
                     f"escalation reason: {reason}"
                 )
-                ticket = create_ticket(summary=summary, order_id=current_order_id, reason=reason, intent=_intent_for(question))
+                # Clear any previous reference before a new ticket attempt; never leak stale IDs.
+                last_ticket_id = None
+                ticket = _create_ticket_result_safely(
+                    create_ticket,
+                    summary=summary,
+                    order_id=current_order_id,
+                    reason=reason,
+                    intent=_intent_for(question),
+                )
                 extra_handover_instruction = ""
                 high_value_claim = "more than ₹10,000" in reason
                 if high_value_claim:
@@ -885,7 +1151,7 @@ def step3() -> None:
                         "AI assistant cannot approve the claim, grounding this in [DWM-3] and [ESC-1]."
                     )
                 if ticket.get("created") is True:
-                    last_ticket_id = str(ticket.get("ticket_id") or "").strip() or None
+                    last_ticket_id = _safe_interactive_ticket_reference(ticket.get("ticket_id"))
                 answer = _generate_handover_answer(
                     client=client,
                     question=question,

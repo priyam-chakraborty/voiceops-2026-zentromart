@@ -1,0 +1,32 @@
+VOICEOPS OFFLINE HARDENING VERIFICATION
+Date: 23 October 2026
+Workbench: reconstructed from project source archives and earlier patch files
+
+FINAL RESULT: PASS
+- Offline unit/regression tests: 79 passed across 13 test suites
+- Synthetic dataset integrity validator: PASS
+  * 9 CSVs; 21 knowledge-base documents
+  * 1,000 orders; 1,783 order items; 244 support logs
+  * 52 practice questions; 23 conversations
+- Practice evidence-reference audit: PASS
+  * all gold knowledge-base IDs, hard-negative IDs, and product SKUs resolve
+  * 84 known knowledge-base section IDs; 70 known product SKUs
+- Python compilation of application, evaluator, test runner and patch scripts: PASS
+- Overall quality gates: 4/4 PASS
+- Clean-source patch compatibility: PASS; the cache, identifier, Step 3 handover and voice-batch patches applied and compiled without Gemini/Gnani calls
+
+Offline checks cover cache fingerprint/vector validation and atomic writes; consistent
+embedding-model defaults; query/document vector dimension matching; date/SKU-resistant
+order and verification parsing; ticket-tool, retrieval and answer-generation failure
+fallbacks; per-turn ticket reference isolation; safe evidence projection and privacy.
+
+IMPORTANT LIMITATIONS
+This verifies offline behavior only. It does not certify all 52 live Gemini-generated
+answers, Gnani STT/TTS with real credentials/audio, network latency, or actual embedding
+recall. Provider-backed evaluation remains incomplete because quota/availability errors
+were encountered earlier. No Gemini/Gnani calls were made by the final quality run.
+
+No changes were made to the user's Windows folder or GitHub repository from this
+workbench. Apply included patches only after their --check commands pass in the user's
+own checkout. The pack excludes the dataset, demo video, .env, API credentials, Git
+history, evaluation checkpoints, backups and cache files.

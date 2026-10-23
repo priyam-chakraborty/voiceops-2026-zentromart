@@ -118,3 +118,87 @@ class RetrievalTopicPriorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+# VOICEOPS_RETRIEVAL_CONTEXT_ISOLATION_TESTS_V1
+import unittest as _voiceops_unittest
+from unittest.mock import patch as _voiceops_patch
+import run as _voiceops_retrieval_run
+
+
+class RetrievalContextIsolationTests(_voiceops_unittest.TestCase):
+    @staticmethod
+    def _fixtures():
+        current_question = "How long does a wallet refund take now?"
+        contextual_query = (
+            "Recent customer context: What was the old return policy? | "
+            "Current question: " + current_question
+        )
+        chunks = [
+            {
+                "section_id": "REF-CURRENT-1",
+                "source": "pol_refunds.md",
+                "doc_type": "policy",
+                "status": "current",
+                "effective_from": "2026-01-01",
+                "text": "Current wallet refund timing policy.",
+            },
+            {
+                "section_id": "REF-OLD-1",
+                "source": "pol_old_refunds.md",
+                "doc_type": "policy",
+                "status": "superseded",
+                "effective_from": "2024-01-01",
+                "text": "Superseded historical refund timing policy.",
+            },
+        ]
+        vectors = [[1.0, 0.0], [0.99, 0.01]]
+        return current_question, contextual_query, chunks, vectors
+
+    def test_history_mention_does_not_enable_superseded_policy_for_current_question(self):
+        current_question, contextual_query, chunks, vectors = self._fixtures()
+        with (
+            _voiceops_patch.object(_voiceops_retrieval_run, "_embed_texts", return_value=[[1.0, 0.0]]) as embed,
+            _voiceops_patch.object(
+                _voiceops_retrieval_run,
+                "_asks_for_historical_policy",
+                wraps=_voiceops_retrieval_run._asks_for_historical_policy,
+            ) as historical_check,
+            _voiceops_patch.object(_voiceops_retrieval_run, "_retrieval_topic_bonus", return_value=0.0),
+            _voiceops_patch.object(_voiceops_retrieval_run, "_product_catalog_chunks_for_question", return_value=[]),
+        ):
+            selected = _voiceops_retrieval_run.retrieve(
+                None, contextual_query, chunks, vectors, topic_question=current_question
+            )
+
+        historical_check.assert_called_once_with(current_question)
+        self.assertEqual(embed.call_args.args[1], [contextual_query])
+        self.assertIn("REF-CURRENT-1", [chunk["section_id"] for chunk in selected])
+        self.assertNotIn("REF-OLD-1", [chunk["section_id"] for chunk in selected])
+
+    def test_topic_bonuses_use_current_turn_not_enriched_history(self):
+        current_question, contextual_query, chunks, vectors = self._fixtures()
+        with (
+            _voiceops_patch.object(_voiceops_retrieval_run, "_embed_texts", return_value=[[1.0, 0.0]]),
+            _voiceops_patch.object(_voiceops_retrieval_run, "_asks_for_historical_policy", return_value=False),
+            _voiceops_patch.object(_voiceops_retrieval_run, "_retrieval_topic_bonus", return_value=0.0) as bonus,
+            _voiceops_patch.object(_voiceops_retrieval_run, "_product_catalog_chunks_for_question", return_value=[]),
+        ):
+            _voiceops_retrieval_run.retrieve(
+                None, contextual_query, chunks, vectors, topic_question=current_question
+            )
+
+        self.assertTrue(bonus.call_args_list)
+        self.assertTrue(all(call.args[0] == current_question for call in bonus.call_args_list))
+
+    def test_legacy_call_uses_its_question_as_topic_question(self):
+        current_question, _, chunks, vectors = self._fixtures()
+        with (
+            _voiceops_patch.object(_voiceops_retrieval_run, "_embed_texts", return_value=[[1.0, 0.0]]),
+            _voiceops_patch.object(_voiceops_retrieval_run, "_asks_for_historical_policy", return_value=False) as historical_check,
+            _voiceops_patch.object(_voiceops_retrieval_run, "_retrieval_topic_bonus", return_value=0.0) as bonus,
+            _voiceops_patch.object(_voiceops_retrieval_run, "_product_catalog_chunks_for_question", return_value=[]),
+        ):
+            _voiceops_retrieval_run.retrieve(None, current_question, chunks, vectors)
+
+        historical_check.assert_called_once_with(current_question)
+        self.assertTrue(bonus.call_args_list)
+        self.assertTrue(all(call.args[0] == current_question for call in bonus.call_args_list))
