@@ -32,10 +32,14 @@ ESCALATION_MARKERS = (
     "human", "colleague", "support team", "support ticket", "ticket", "handover",
     "hand over", "priority resolution", "escalat", "सहयोगी",
 )
+# VOICEOPS_HINDI_CLARIFICATION_HEURISTIC_V1
 CLARIFY_MARKERS = (
     "please share", "please provide", "could you provide", "which", "what is your",
     "what's your", "can you tell me", "could you tell me", "order id", "order number",
     "last four", "pincode", "pin code",
+    # Common Hindi clarification wording, including the dataset's PQ0018 reference answer.
+    "कौन सा", "कौन सी", "कौन से", "किस सामान", "किस चीज",
+    "कृपया बताएं", "कृपया बताइए",
 )
 REFUSAL_MARKERS = (
     "cannot approve", "can't approve", "cannot do that", "can't do that", "i cannot",
