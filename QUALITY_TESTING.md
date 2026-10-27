@@ -1,8 +1,8 @@
 # VoiceOps Offline Quality Testing
 
-**Current local hardening snapshot: 23 October 2026**
+**Current local hardening snapshot: 27 October 2026**
 
-The current project working tree passed **121 unit/regression tests** and all **4 quality gates** in `run_offline_quality_checks.py`:
+The current project working tree passed **126 unit/regression tests** and all **4 quality gates** in `run_offline_quality_checks.py`:
 
 1. Offline unit and regression tests
 2. Synthetic dataset integrity
@@ -20,7 +20,7 @@ py run_offline_quality_checks.py
 For this snapshot, the expected summary is:
 
 ```text
-Unit tests counted: 121
+Unit tests counted: 126
 PASS  offline unit/regression suites
 PASS  dataset integrity
 PASS  practice evidence references
@@ -46,11 +46,12 @@ The aggregate runner executes these modules:
 - `test_unsupported_midnight_delivery`
 - `test_wallet_refund_retrieval`
 - `test_reference_answers_52`
+- `test_response_quality_guardrails`
 - `test_index_cache_hardening`
 - `test_identifier_parsing`
 - `test_voice_batch_offline`
 
-The tests cover tool verification and privacy, honest ticket confirmations, malformed and exceptional tool responses, order-switch verification, current versus superseded policy evidence, context-isolated topic ranking, product catalog lookup, embedding-cache/vector validation, conservative identifier extraction, safe error handling, and voice-batch file/state/output behavior.
+The tests cover tool verification and privacy, honest ticket confirmations, malformed and exceptional tool responses, order-switch verification, current versus superseded policy evidence, context-isolated topic ranking, product catalog lookup, embedding-cache/vector validation, conservative identifier extraction, safe error handling, and voice-batch file/state/output behavior. The response-quality guardrail tests verify required refund-date and clarify-first prompt instructions and test Hindi uncertainty/handover scoring markers.
 
 ## Evidence-reference audit
 
@@ -68,6 +69,6 @@ For the current dataset, the audit checked 52 practice records (47 marked answer
 - The reference-answer heuristic evaluates supplied reference text; 52 correct reference records do not mean the live agent generated 52 correct answers.
 - Synthetic retrieval-ranking tests exercise selected known scenarios; they do not establish recall for every query.
 - The dataset contains synthetic records for a fictional store. The mock verification tool is not a production authentication system.
-- The 121 tests and 4/4 gates are local regression evidence, not official capstone scoring or proof of production readiness.
+- The 126 tests and 4/4 gates are local regression evidence, not official capstone scoring or proof of production readiness.
 
 Before submission, run the aggregate command on the exact final working tree and synchronize intended code/tests with the public GitHub repository. A local ZIP and a public repository link should refer to the same source snapshot.

@@ -32,6 +32,8 @@ available policy documents and offer a human handover when appropriate.
 When documents conflict, prefer a current policy, then an agent guide, help article, FAQ,
 and finally a marketing page. A superseded document is not current policy authority.
 Cite the section ID(s) used, in square brackets, for example [RET-2]. Be concise and kind.
+For refund-timeline questions that provide an initiation date and ask by when the money should arrive, state both the policy's business-day range and the estimated latest calendar date. Count the next business day after the initiation date as day 1; do not count Saturdays or Sundays. Do not invent public holidays: describe the calculated date as an estimate that may shift for bank/public holidays not supplied in the evidence. If the initiation date or payment method is missing, ask a concise clarifying question instead of guessing.
+When a return-window question does not identify the product or category, ask one short clarifying question first. Do not list every category-specific return window until the customer identifies the product/category.
 This first RAG stage does not have order lookup or ticket tools, so never claim to have used them.
 """.strip()
 
@@ -581,6 +583,7 @@ def step2() -> None:
 
 
 
+# VOICEOPS_RESPONSE_QUALITY_GUARDRAILS_V2
 STEP3_SYSTEM_PROMPT = """
 You are ZentroMart's conversational customer support assistant for a fictional Indian online store.
 On the first reply, identify yourself as an AI assistant. Be concise, patient and helpful.
@@ -595,6 +598,8 @@ The tool layer performs order verification and ticket creation. Never claim an o
 verified tool data is supplied. Never claim a ticket was created unless the ticket tool explicitly succeeded.
 If the documents do not support an answer, say you cannot confirm it and offer a human handover when appropriate.
 The dataset reference date is 20 October 2026. Be clear when a date or timeline depends on this reference date.
+For refund-timeline questions that provide an initiation date and ask by when the money should arrive, state both the policy's business-day range and the estimated latest calendar date. Count the next business day after the initiation date as day 1; do not count Saturdays or Sundays. Do not invent public holidays: describe the calculated date as an estimate that may shift for bank/public holidays not supplied in the evidence. If the initiation date or payment method is missing, ask a concise clarifying question instead of guessing.
+When a return-window question does not identify the product or category, ask one short clarifying question first. Do not list every category-specific return window until the customer identifies the product/category.
 """.strip()
 
 

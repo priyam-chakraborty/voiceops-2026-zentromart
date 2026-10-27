@@ -22,24 +22,33 @@ DATASET = ROOT / "Capstone_Project_Dataset_FTTT_2026"
 QUESTIONS_FILE = DATASET / "practice" / "questions.csv"
 
 UNCERTAINTY_MARKERS = (
-    "cannot confirm", "can't confirm", "cannot verify", "don't know", "do not know",
     "not sure", "not available", "no information", "not covered", "i don't have",
     "i do not have", "can't find", "cannot find", "unable to confirm", "unable to find",
-    "not able to find", "connect you", "human support", "colleague", "जानकारी नहीं",
-    "पता नहीं", "jaankari nahi", "pata nahi",
+    "not able to find", "couldn't find", "can't confirm", "cannot confirm",
+    "i cannot confirm", "i can't confirm", "i cannot verify", "not in the available documents",
+    "information is not available",
+    "जानकारी नहीं", "जानकारी उपलब्ध नहीं", "मेरे पास जानकारी नहीं", "इस बारे में जानकारी नहीं",
+    "पुष्टि नहीं कर सकता", "पुष्टि नहीं कर सकती", "पुष्टि नहीं कर पा रहा", "पुष्टि नहीं कर पा रही",
+    "सुनिश्चित नहीं कर सकता", "सुनिश्चित नहीं कर सकती", "दस्तावेज़ों के आधार पर पुष्टि नहीं",
+    "pata nahi", "jaankari nahi", "confirm nahi kar sakta", "confirm nahi kar sakti",
 )
 ESCALATION_MARKERS = (
     "human", "colleague", "support team", "support ticket", "ticket", "handover",
-    "hand over", "priority resolution", "escalat", "सहयोगी",
+    "hand over", "priority resolution", "escalat", "connect you", "connect me",
+    "सहयोगी", "मानव सहायता", "मानव सहायता प्रतिनिधि", "मानव सहायता टीम", "सहायता प्रतिनिधि",
+    "जोड़ सकता", "जोड़ सकती", "जोड़ दूँ", "जोड़ दूंगी", "जुड़वा सकता", "जुड़वा सकती",
+    "संपर्क करा", "संपर्क करवा", "कनेक्ट कर",
 )
-# VOICEOPS_HINDI_CLARIFICATION_HEURISTIC_V1
+# VOICEOPS_HINDI_CLARIFICATION_HEURISTIC_V2
 CLARIFY_MARKERS = (
     "please share", "please provide", "could you provide", "which", "what is your",
     "what's your", "can you tell me", "could you tell me", "order id", "order number",
     "last four", "pincode", "pin code",
-    # Common Hindi clarification wording, including the dataset's PQ0018 reference answer.
-    "कौन सा", "कौन सी", "कौन से", "किस सामान", "किस चीज",
-    "कृपया बताएं", "कृपया बताइए",
+    "कौन सा", "कौन-सा", "कौन सी", "कौन-सी", "कौन से", "कौन-से",
+    "किस सामान", "किस चीज", "किस चीज़", "किस उत्पाद", "किस प्रोडक्ट", "किस श्रेणी",
+    "किस कैटेगरी", "प्रोडक्ट की कैटेगरी", "उत्पाद की श्रेणी", "कैटेगरी या जानकारी",
+    "कृपया बताएं", "कृपया बताइए", "कृपया साझा करें", "जानकारी साझा करें", "साझा करें",
+    "क्या आप बता सकते हैं", "क्या आप बता सकती हैं", "कृपया प्रोडक्ट की कैटेगरी",
 )
 REFUSAL_MARKERS = (
     "cannot approve", "can't approve", "cannot do that", "can't do that", "i cannot",
@@ -62,13 +71,36 @@ def split_groups(field: str) -> list[list[str]]:
     return groups
 
 
+# VOICEOPS_RESPONSE_QUALITY_GUARDRAILS_V2
+UNCERTAINTY_REQUIREMENT_OPTIONS = {
+    "don't have", "do not have", "not sure", "no information", "can't find",
+    "cannot find", "not able to find", "couldn't find", "जानकारी नहीं", "pata nahi",
+    "jaankari nahi",
+}
+ESCALATION_REQUIREMENT_OPTIONS = {"connect", "connect you", "colleague", "सहयोगी"}
+
+
+def _required_group_matches(text: str, group: list[str]) -> bool:
+    if any(option in text for option in group):
+        return True
+    # These slash-separated options are alternate ways to express the same
+    # expected behavior. Accept recognized Hindi equivalents, not just English literals.
+    if any(option in UNCERTAINTY_REQUIREMENT_OPTIONS for option in group):
+        if any(marker in text for marker in UNCERTAINTY_MARKERS):
+            return True
+    if any(option in ESCALATION_REQUIREMENT_OPTIONS for option in group):
+        if any(marker in text for marker in ESCALATION_MARKERS):
+            return True
+    return False
+
+
 def groups_met(answer: str, field: str) -> tuple[int, int, list[str]]:
     text = norm(answer)
     groups = split_groups(field)
     missed: list[str] = []
     met = 0
     for group in groups:
-        if any(option in text for option in group):
+        if _required_group_matches(text, group):
             met += 1
         else:
             missed.append(" / ".join(group))
@@ -129,8 +161,32 @@ def score_answer(answer: str, row: dict[str, str]) -> dict[str, Any]:
 
 
 def transient_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return any(token in message for token in ("503", "unavailable", "429", "resource_exhausted", "rate limit", "temporarily"))
+    message = str(exc).casefold()
+
+    # Do not retry immediately when the daily free-tier quota is exhausted.
+    daily_quota_markers = (
+        "you exceeded your current quota",
+        "quota exceeded for metric",
+        "generate_content_free_tier_requests",
+        "generaterequestsperdaypermodel-freetier",
+        "daily quota",
+    )
+
+    if any(marker in message for marker in daily_quota_markers):
+        return False
+
+    # Other temporary errors can receive bounded retries.
+    return any(
+        token in message
+        for token in (
+            "503",
+            "unavailable",
+            "429",
+            "resource_exhausted",
+            "rate limit",
+            "temporarily",
+        )
+    )
 
 
 def with_retry(label: str, fn: Callable[[], Any]) -> Any:
@@ -140,12 +196,16 @@ def with_retry(label: str, fn: Callable[[], Any]) -> Any:
         except Exception as exc:
             if attempt >= 2 or not transient_error(exc):
                 raise
-            delay = 3 * (attempt + 1)
-            print(f"  {label}: temporary service/rate error; retrying in {delay}s (attempt {attempt + 2}/3)")
+
+            # Exponential backoff: 10 seconds, then 20 seconds.
+            delay = 10 * (2 ** attempt)
+            print(
+                f"  {label}: temporary service/rate error; "
+                f"retrying in {delay}s (attempt {attempt + 2}/3)"
+            )
             time.sleep(delay)
+
     raise RuntimeError("Unexpected retry loop exit")
-
-
 def read_questions() -> list[dict[str, str]]:
     if not QUESTIONS_FILE.exists():
         raise FileNotFoundError(

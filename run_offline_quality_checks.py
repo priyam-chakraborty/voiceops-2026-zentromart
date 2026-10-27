@@ -28,6 +28,7 @@ TEST_MODULES = [
     "test_unsupported_midnight_delivery",
     "test_wallet_refund_retrieval",
     "test_reference_answers_52",
+    "test_response_quality_guardrails",
     "test_index_cache_hardening",
     "test_identifier_parsing",
     "test_voice_batch_offline",
