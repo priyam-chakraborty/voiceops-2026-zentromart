@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+import re
 
 ROOT = Path(__file__).resolve().parent
 DATASET = ROOT / "Capstone_Project_Dataset_FTTT_2026"
@@ -32,7 +33,7 @@ available policy documents and offer a human handover when appropriate.
 When documents conflict, prefer a current policy, then an agent guide, help article, FAQ,
 and finally a marketing page. A superseded document is not current policy authority.
 Cite the section ID(s) used, in square brackets, for example [RET-2]. Be concise and kind.
-For refund-timeline questions that provide an initiation date and ask by when the money should arrive, state both the policy's business-day range and the estimated latest calendar date. Count the next business day after the initiation date as day 1; do not count Saturdays or Sundays. Do not invent public holidays: describe the calculated date as an estimate that may shift for bank/public holidays not supplied in the evidence. If the initiation date or payment method is missing, ask a concise clarifying question instead of guessing.
+For refund-timeline questions that provide an initiation date and ask by when the money should arrive, state both the policy's business-day range and the estimated latest calendar date. Follow the supplied dataset's business-day rule: business days run Monday through Saturday. Start counting on the next calendar date after the initiation date as Day 1; skip Sundays and dates explicitly listed as holidays in the dataset's holidays.csv or clearly identified in the retrieved evidence. Do not automatically skip Saturdays. Do not invent holidays; if the applicable holiday calendar is unavailable, state that the estimated date may shift for holidays. Do not invent public holidays: describe the calculated date as an estimate that may shift for bank/public holidays not supplied in the evidence. If the initiation date or payment method is missing, ask a concise clarifying question instead of guessing.
 When a return-window question does not identify the product or category, ask one short clarifying question first. Do not list every category-specific return window until the customer identifies the product/category.
 This first RAG stage does not have order lookup or ticket tools, so never claim to have used them.
 """.strip()
@@ -509,6 +510,57 @@ def _retrieval_topic_bonus(question: str, chunk: dict) -> float:
     return bonus
 
 
+# VOICEOPS_REFUND_CALENDAR_FORCE_RETRIEVAL_V1
+_REFUND_CALENDAR_DATE_RE = re.compile(
+    r"\b\d{1,2}\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+    r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?)\b"
+)
+
+
+def _is_date_specific_refund_question(question: str) -> bool:
+    """Return True when the current question is about a dated refund timeline."""
+    q = " ".join(question.casefold().replace("’", "'").split())
+    refund_q = any(term in q for term in (
+        "refund", "upi", "net banking", "credit card", "wallet",
+        "cash on delivery", "cash-on-delivery", "cod", "money back",
+        "रिफंड", "रिफ़ंड", "paise wapas",
+    ))
+    if not refund_q:
+        return False
+    date_specific = any(marker in q for marker in (
+        "started on", "was started", "refund was started", "by which date",
+        "date should", "शुरू",
+    )) or bool(_REFUND_CALENDAR_DATE_RE.search(q))
+    return date_specific
+
+
+def _append_refund_calendar_evidence(
+    selected: list[dict],
+    chunks: list[dict],
+    adjusted: list[tuple[float, int]],
+    question: str,
+    historical_policy_query: bool,
+) -> list[dict]:
+    """Always include the current calendar section for a dated refund timeline."""
+    if historical_policy_query or not _is_date_specific_refund_question(question):
+        return selected
+    if any(item.get("section_id") == "KB-00.3" for item in selected):
+        return selected
+
+    # Use the already-scored candidates, and never inject a superseded section
+    # into an ordinary current-policy answer.
+    for score, idx in adjusted:
+        chunk = chunks[idx]
+        if (
+            chunk.get("section_id") == "KB-00.3"
+            and str(chunk.get("status", "current")).lower() == "current"
+        ):
+            selected.append(chunk | {"retrieval_score": round(score, 4)})
+            break
+    return selected
+
+
 def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float]], top_k: int = 5, *, topic_question: str | None = None) -> list[dict]:
     import numpy as np
     embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip() or "gemini-embedding-001"
@@ -544,6 +596,10 @@ def retrieve(client, question: str, chunks: list[dict], vectors: list[list[float
         adjusted.append((score, idx))
     selected = [chunks[i] | {"retrieval_score": round(score, 4)} for score, i in
                 sorted(adjusted, reverse=True)[:top_k]]
+    # A score bonus alone cannot guarantee this calendar evidence survives top-k truncation.
+    selected = _append_refund_calendar_evidence(
+        selected, chunks, adjusted, topic_query, historical_policy_query
+    )
     # Exact SKU/product-name matches supplement semantic policy retrieval with structured data.
     selected.extend(_product_catalog_chunks_for_question(question))
     return selected
@@ -598,7 +654,7 @@ The tool layer performs order verification and ticket creation. Never claim an o
 verified tool data is supplied. Never claim a ticket was created unless the ticket tool explicitly succeeded.
 If the documents do not support an answer, say you cannot confirm it and offer a human handover when appropriate.
 The dataset reference date is 20 October 2026. Be clear when a date or timeline depends on this reference date.
-For refund-timeline questions that provide an initiation date and ask by when the money should arrive, state both the policy's business-day range and the estimated latest calendar date. Count the next business day after the initiation date as day 1; do not count Saturdays or Sundays. Do not invent public holidays: describe the calculated date as an estimate that may shift for bank/public holidays not supplied in the evidence. If the initiation date or payment method is missing, ask a concise clarifying question instead of guessing.
+For refund-timeline questions that provide an initiation date and ask by when the money should arrive, state both the policy's business-day range and the estimated latest calendar date. Follow the supplied dataset's business-day rule: business days run Monday through Saturday. Start counting on the next calendar date after the initiation date as Day 1; skip Sundays and dates explicitly listed as holidays in the dataset's holidays.csv or clearly identified in the retrieved evidence. Do not automatically skip Saturdays. Do not invent holidays; if the applicable holiday calendar is unavailable, state that the estimated date may shift for holidays. Do not invent public holidays: describe the calculated date as an estimate that may shift for bank/public holidays not supplied in the evidence. If the initiation date or payment method is missing, ask a concise clarifying question instead of guessing.
 When a return-window question does not identify the product or category, ask one short clarifying question first. Do not list every category-specific return window until the customer identifies the product/category.
 """.strip()
 
